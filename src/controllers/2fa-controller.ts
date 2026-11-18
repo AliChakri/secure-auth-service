@@ -277,7 +277,7 @@ export const disable2FA = async (
     });
 };
 
-export const buckup2FALogin = async (
+export const backup2FALogin = async (
     req: Request,
     res: Response,
     next: NextFunction
@@ -382,7 +382,7 @@ export const buckup2FALogin = async (
     });
 };
 
-export const getBuckupCodeStat = async (
+export const getBackupCodeStat = async (
     req: Request,
     res: Response,
     next: NextFunction
@@ -390,104 +390,14 @@ export const getBuckupCodeStat = async (
     const currentUserId = req.user?.id || req.user?._id;
 
     if (!currentUserId) {
-        return next(new AppError('Unauthorized: Please login and enable 2FA', 401));
-    }
-
-    const { token, password } = req.body;
-
-    if (!token) {
-        return next(new AppError('Token is Required', 400));
-    }
-
-    const [user] = await db
-        .select()
-        .from(users)
-        .where(eq(users.id, currentUserId))
-        .limit(1);
-
-    if (!user) {
-        return next(new AppError('User Not Found', 404));
-    }
-
-    // Check auth provider
-    const [localAccount] = await db
-        .select()
-        .from(authAccounts)
-        .where(and(eq(authAccounts.userId, user.id), eq(authAccounts.provider, 'local')))
-        .limit(1);
-
-    if (localAccount && user.passwordHash) {
-        if (!password) {
-            return next(new AppError('Password is required for verification', 400));
-        }
-        const isMatched = await bcrypt.compare(password, user.passwordHash);
-        if (!isMatched) {
-            return next(new AppError('Invalid Password', 400));
-        }
+        return next(new AppError('Unauthorized: Please login', 401));
     }
 
     const [twoFactorRecord] = await db
-        .select()
-        .from(userTwoFactor)
-        .where(eq(userTwoFactor.userId, user.id))
-        .limit(1);
-
-    if (!twoFactorRecord?.enabled || !twoFactorRecord.secretEncrypted) {
-        return next(new AppError('Two Factor Authentication not enabled', 400));
-    }
-
-    const isValid = speakeasy.totp.verify({
-        secret: twoFactorRecord.secretEncrypted,
-        encoding: 'base32',
-        token: String(token).trim(),
-        window: 1,
-    });
-
-    if (!isValid) {
-        return next(new AppError('Invalid Code', 400));
-    }
-
-    const backupCodes = await db
-        .select()
-        .from(twoFactorBackupCodes)
-        .where(eq(twoFactorBackupCodes.userId, user.id))
-        .orderBy(asc(twoFactorBackupCodes.createdAt));
-
-    const status = backupCodes.map((code, index) => ({
-        id: index + 1,
-        preview: '••••••••',
-        used: code.usedAt !== null,
-        usedAt: code.usedAt,
-    }));
-
-    const remaining = status.filter((c) => !c.used).length;
-    const total = status.length;
-
-    res.status(200).json({
-        status: 'success',
-        data: {
-            codes: status,
-            remaining,
-            total,
-            generatedAt: twoFactorRecord.backupCodesGeneratedAt,
-            shouldRegenerate: remaining <= 2,
-        },
-    });
-};
-
-export const getBuckupCodeDetails = async (
-    req: Request,
-    res: Response,
-    next: NextFunction
-): Promise<void> => {
-    const currentUserId = req.user?.id || req.user?._id;
-
-    if (!currentUserId) {
-        return next(new AppError('Unauthorized: Please login and enable 2FA', 401));
-    }
-
-    const [twoFactorRecord] = await db
-        .select()
+        .select({
+            enabled: userTwoFactor.enabled,
+            generatedAt: userTwoFactor.backupCodesGeneratedAt,
+        })
         .from(userTwoFactor)
         .where(eq(userTwoFactor.userId, currentUserId))
         .limit(1);
@@ -497,33 +407,30 @@ export const getBuckupCodeDetails = async (
     }
 
     const backupCodes = await db
-        .select()
+        .select({
+            usedAt: twoFactorBackupCodes.usedAt,
+        })
         .from(twoFactorBackupCodes)
-        .where(eq(twoFactorBackupCodes.userId, currentUserId))
-        .orderBy(asc(twoFactorBackupCodes.createdAt));
+        .where(eq(twoFactorBackupCodes.userId, currentUserId));
 
-    const status = backupCodes.map((code, index) => ({
-        id: index + 1,
-        used: code.usedAt !== null,
-        usedAt: code.usedAt,
-    }));
-
-    const remaining = status.filter((c) => !c.used).length;
-    const total = status.length;
+    const total = backupCodes.length;
+    const remaining = backupCodes.filter(
+        code => code.usedAt === null
+    ).length;
 
     res.status(200).json({
         status: 'success',
         data: {
-            codes: status,
-            remaining,
             total,
-            generatedAt: twoFactorRecord.backupCodesGeneratedAt,
+            remaining,
+            used: total - remaining,
+            generatedAt: twoFactorRecord.generatedAt,
             shouldRegenerate: remaining <= 2,
         },
     });
 };
 
-export const regenerateBuckupCode = async (
+export const regenerateBackupCode = async (
     req: Request,
     res: Response,
     next: NextFunction

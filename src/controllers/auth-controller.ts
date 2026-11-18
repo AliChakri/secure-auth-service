@@ -60,8 +60,9 @@ export const register = async (
     const [existingUser] = await db
         .select()
         .from(users)
-        .where(eq(sql`lower(${users.email})`, normalizedEmail))
+        .where(eq(users.email, normalizedEmail))
         .limit(1);
+
 
     if (existingUser) {
         return next(new AppError('User Already exists', 400));

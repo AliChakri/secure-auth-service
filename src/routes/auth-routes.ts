@@ -6,9 +6,8 @@ import { forgotPassword, googleLogin, login, logout, me, refreshToken, register,
 import { BuckupCodeLoginLimiter, GetBuckupCodeLimiter, gooleOAuthLimiter, loginLimiter, otpLimiter, RegenerateBuckupCodeLimiter, registerLimiter, RequestRecoveryLinkLimiter, twoFADisableLimiter, twoFALoginLimiter, twoFAVerifyLimiter } from '../middleware/rate-limit-middleware.js';
 
 import { validate } from '../middleware/validate-middleware.js';
-import { backupCodeSchema, BuckupCodeLoginSchema, disable2FASchema, EmailShcema, loginSchema, otpSchema, RegenerateBuckupCodeSchema, registerSchema, resetPasswordSchema, twoFAVerifySchema, verifyLogin2FASchema, VerifyRecoveryLinkSchema } from '../validators/auth-schema.js';
-import { verifyBackupCode } from '../services/buckup-code.js';
-import { buckup2FALogin, disable2FA, getBuckupCodeDetails, getBuckupCodeStat, regenerateBuckupCode, requestRecoveryLink, setup2FA, verify2FA, verifyRecoveryLink } from '../controllers/2fa-controller.js';
+import { BuckupCodeLoginSchema, disable2FASchema, EmailShcema, loginSchema, otpSchema, RegenerateBuckupCodeSchema, registerSchema, resetPasswordSchema, twoFAVerifySchema, verifyLogin2FASchema, VerifyRecoveryLinkSchema } from '../validators/auth-schema.js';
+import { backup2FALogin, disable2FA, getBackupCodeStat, regenerateBackupCode, requestRecoveryLink, setup2FA, verify2FA, verifyRecoveryLink } from '../controllers/2fa-controller.js';
 import { protect } from '../middleware/auth-middleware.js';
 
 const authRouter: Router = Router();
@@ -97,7 +96,7 @@ authRouter.post(
     '/2fa/login/verify-buckup',
     BuckupCodeLoginLimiter,
     validate(BuckupCodeLoginSchema),
-    buckup2FALogin
+    backup2FALogin
 );
 
 authRouter.post(
@@ -105,13 +104,7 @@ authRouter.post(
     protect,
     GetBuckupCodeLimiter,
     validate(RegenerateBuckupCodeSchema),
-    getBuckupCodeStat
-);
-
-authRouter.get(
-    '/2fa/buckup-code/overview',
-    protect,
-    getBuckupCodeDetails
+    getBackupCodeStat
 );
 
 authRouter.post(
@@ -119,7 +112,7 @@ authRouter.post(
     protect,
     RegenerateBuckupCodeLimiter,
     validate(RegenerateBuckupCodeSchema),
-    regenerateBuckupCode
+    regenerateBackupCode
 );
 
 // ----- Email Recovery Link Routes ------

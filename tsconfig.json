@@ -12,6 +12,6 @@
     "forceConsistentCasingInFileNames": true,
     "typeRoots": ["./node_modules/@types", "./src/@types"]
   },
-  "include": ["src/**/*", "src/test-server.ts"],
+  "include": ["src/**/*", "src/test-server.ts", "/drizzle.config.ts"],
   "exclude": ["node_modules"]
 }
