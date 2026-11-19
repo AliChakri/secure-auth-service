@@ -99,11 +99,10 @@ authRouter.post(
     backup2FALogin
 );
 
-authRouter.post(
+authRouter.get(
     '/2fa/buckup-code/stat',
     protect,
     GetBuckupCodeLimiter,
-    validate(RegenerateBuckupCodeSchema),
     getBackupCodeStat
 );
 

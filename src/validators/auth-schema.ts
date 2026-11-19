@@ -70,10 +70,10 @@ export const twoFAVerifySchema = z.object({
 
 export const BuckupCodeLoginSchema = z.object({
     body: z.object({
+        token: z.string()
+                .length(8, "Buckup code must be 8 digits"),
         tempToken: z.string()
                 .min(8),
-        buckupCode: z.string()
-                .length(8, "Buckup code must be 8 digits"),
     })
 });
 

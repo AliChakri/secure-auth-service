@@ -282,7 +282,7 @@ export const backup2FALogin = async (
     res: Response,
     next: NextFunction
 ): Promise<void> => {
-    const { buckupCode, tempToken } = req.body;
+    const { token: buckupCode, tempToken } = req.body;
 
     if (!buckupCode || !tempToken) {
         return next(new AppError('Missing Fields', 400));
@@ -326,9 +326,11 @@ export const backup2FALogin = async (
         return next(new AppError('No unused backup codes found. Please use account recovery.', 400));
     }
 
+    const normalizedBackupCode = String(buckupCode).trim().toLocaleLowerCase();
+
     let matchedCodeId: string | null = null;
     for (const item of unusedCodes) {
-        const match = await bcrypt.compare(String(buckupCode).trim(), item.codeHash);
+        const match = await bcrypt.compare(normalizedBackupCode, item?.codeHash);
         if (match) {
             matchedCodeId = item.id;
             break;
