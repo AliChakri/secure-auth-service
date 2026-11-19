@@ -14,7 +14,7 @@ import { recoveryTokens } from '../database/schema/auth/recovery-tokens.schema.j
 import { AppError } from "../utils/AppError.js";
 import { twoFADisableLimiter, twoFAVerifyLimiter } from "../middleware/rate-limit-middleware.js";
 import { generateBackupCodes } from "../services/buckup-code.js";
-import { verifyTempToken } from "../security/temp-token.js";
+import { generateTempToken, verifyTempToken } from "../security/temp-token.js";
 import { generateAccessToken, generateRefreshToken } from "../security/token-security.js";
 import redisClient from "../config/redis.js";
 import { generateOtp, hashOtp } from "../utils/otp.js";
@@ -476,21 +476,6 @@ export const regenerateBackupCode = async (
         }
     }
 
-    // Check count of remaining unused codes (must be >= 3 to allow regeneration)
-    const unusedCodes = await db
-        .select()
-        .from(twoFactorBackupCodes)
-        .where(and(eq(twoFactorBackupCodes.userId, user.id), isNull(twoFactorBackupCodes.usedAt)));
-
-    if (unusedCodes.length < 3) {
-        return next(
-            new AppError(
-                `Must have at least 3 backup codes remaining to regenerate. You currently have ${unusedCodes.length}.`,
-                400
-            )
-        );
-    }
-
     const [twoFactorRecord] = await db
         .select()
         .from(userTwoFactor)
@@ -499,6 +484,21 @@ export const regenerateBackupCode = async (
 
     if (!twoFactorRecord?.enabled || !twoFactorRecord.secretEncrypted) {
         return next(new AppError('Two Factor Authentication not enabled', 400));
+    }
+
+    // Check count of remaining unused codes (must be >= 3 to allow regeneration)
+    const unusedCodes = await db
+        .select()
+        .from(twoFactorBackupCodes)
+        .where(and(eq(twoFactorBackupCodes.userId, user.id), isNull(twoFactorBackupCodes.usedAt)));
+
+    if (unusedCodes.length >= 3) {
+        return next(
+            new AppError(
+                `Must have at least 3 backup codes remaining to regenerate. You currently have ${unusedCodes.length}.`,
+                400
+            )
+        );
     }
 
     const matched = speakeasy.totp.verify({
@@ -555,7 +555,7 @@ export const requestRecoveryLink = async (
     const { email } = req.body;
 
     if (!email) {
-        return next(new AppError('Email Address is Required', 400));
+        return next(new AppError('Email address is required', 400));
     }
 
     const normalizedEmail = String(email).trim().toLowerCase();
@@ -566,42 +566,40 @@ export const requestRecoveryLink = async (
         .where(eq(sql`lower(${users.email})`, normalizedEmail))
         .limit(1);
 
-    if (!user) {
-        return next(new AppError('Enable Two Factor Authentication first', 400));
+    if (user) {
+
+        const [twoFactorRecord] = await db
+            .select()
+            .from(userTwoFactor)
+            .where(eq(userTwoFactor.userId, user.id))
+            .limit(1);
+
+        if (twoFactorRecord?.enabled) {
+            const rawToken = crypto.randomBytes(32).toString('hex');
+            const hashedToken = hashOtp(rawToken); // SHA-256 hash helper
+
+            await redisClient.set(
+                `2fa-recovery-token:${user.id}`,
+                hashedToken,
+                { EX: 600 }
+            );
+
+            await db.insert(recoveryTokens).values({
+                userId: user.id,
+                tokenHash: hashedToken,
+                expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+            });
+
+            const recoveryUrl = `${process.env.FRONTEND_URL}/settings/security/2fa/recovery/verify?token=${rawToken}&email=${encodeURIComponent(user.email)}`;
+            console.log(`[2FA Recovery Link for ${user.email}]:`, recoveryUrl);
+            // await sendRecoveryEmail(user.email, recoveryUrl);
+        }
     }
 
-    const [twoFactorRecord] = await db
-        .select()
-        .from(userTwoFactor)
-        .where(eq(userTwoFactor.userId, user.id))
-        .limit(1);
-
-    if (!twoFactorRecord || !twoFactorRecord.enabled) {
-        return next(new AppError('Enable Two Factor Authentication first', 400));
-    }
-
-    const otp = generateOtp();
-    const hashedOtp = hashOtp(otp);
-
-    // Store in Redis (TTL: 10 minutes)
-    await redisClient.set(
-        `2fa-recovery-otp:${user.id}`,
-        hashedOtp,
-        { EX: 600 }
-    );
-
-    // Also persist in recovery_tokens table
-    await db.insert(recoveryTokens).values({
-        userId: user.id,
-        tokenHash: hashedOtp,
-        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
-    });
-
-    console.log(`[2FA Recovery OTP for ${user.email}]:`, otp);
-
+    // Return generic 200 to prevent email enumeration
     res.status(200).json({
         status: 'success',
-        message: 'recovery link has been sent to you',
+        message: 'If an eligible account exists, a recovery link has been sent.',
     });
 };
 
@@ -632,31 +630,12 @@ export const verifyRecoveryLink = async (
         return next(new AppError('Invalid or expired recovery link', 401));
     }
 
-    // If account has local password, require and verify password
-    const [localAccount] = await db
-        .select()
-        .from(authAccounts)
-        .where(and(eq(authAccounts.userId, user.id), eq(authAccounts.provider, 'local')))
-        .limit(1);
-
-    if (localAccount && user.passwordHash) {
-        if (!password) {
-            return next(new AppError('Password is required for local accounts', 400));
-        }
-
-        const isPasswordCorrect = await bcrypt.compare(password, user.passwordHash);
-        if (!isPasswordCorrect) {
-            return next(new AppError('Invalid password', 401));
-        }
-    }
-
     const hashedToken = hashOtp(String(token).trim());
 
-    // Check Redis first
-    const recoveryTokenFromRedis = await redisClient.get(`2fa-recovery-otp:${user.id}`);
+    // 1. Validate recovery link token (Redis -> Postgres fallback)
+    const recoveryTokenFromRedis = await redisClient.get(`2fa-recovery-token:${user.id}`);
     let isTokenValid = recoveryTokenFromRedis === hashedToken;
 
-    // Fallback check against postgres recovery_tokens table
     if (!isTokenValid) {
         const [dbToken] = await db
             .select()
@@ -671,24 +650,148 @@ export const verifyRecoveryLink = async (
             )
             .limit(1);
 
-        if (dbToken) {
-            isTokenValid = true;
-        }
+        if (dbToken) isTokenValid = true;
     }
 
     if (!isTokenValid) {
         return next(new AppError('Invalid or expired recovery link', 401));
     }
 
-    // Cleanup Redis and mark token as used in DB
-    await redisClient.del(`2fa-recovery-otp:${user.id}`);
-    await db
-        .update(recoveryTokens)
-        .set({ usedAt: new Date() })
-        .where(and(eq(recoveryTokens.userId, user.id), eq(recoveryTokens.tokenHash, hashedToken)));
+    // 2. Check linked auth methods
+    const accounts = await db
+        .select()
+        .from(authAccounts)
+        .where(eq(authAccounts.userId, user.id));
 
-    // Atomically disable 2FA and delete backup codes
+    const localAccount = accounts.find((acc) => acc.provider === 'local');
+    const oauthAccount = accounts.find((acc) => acc.provider !== 'local');
+
+    // CASE A: Local user -> verify password and disable 2FA immediately
+    if (localAccount && user.passwordHash) {
+        if (!password) {
+            return next(new AppError('Password is required for local accounts', 400));
+        }
+
+        const isPasswordCorrect = await bcrypt.compare(password, user.passwordHash);
+        if (!isPasswordCorrect) {
+            return next(new AppError('Invalid password', 401));
+        }
+
+        await redisClient.del(`2fa-recovery-token:${user.id}`);
+
+        await db.transaction(async (tx) => {
+            await tx
+                .update(recoveryTokens)
+                .set({ usedAt: new Date() })
+                .where(
+                    and(
+                        eq(recoveryTokens.userId, user.id),
+                        eq(recoveryTokens.tokenHash, hashedToken),
+                        isNull(recoveryTokens.usedAt)
+                    )
+                );
+
+            await tx
+                .update(userTwoFactor)
+                .set({
+                    enabled: false,
+                    secretEncrypted: null,
+                    tempSecretEncrypted: null,
+                    verifiedAt: null,
+                    backupCodesGeneratedAt: null,
+                })
+                .where(eq(userTwoFactor.userId, user.id));
+
+            await tx
+                .delete(twoFactorBackupCodes)
+                .where(eq(twoFactorBackupCodes.userId, user.id));
+        });
+
+        res.status(200).json({
+            status: 'success',
+            requiresOAuthReauth: false,
+            message: '2FA has been disabled. You can now log in and set it up again.',
+        });
+        return;
+    }
+
+    // CASE B: OAuth-only user -> bind a short-lived recovery session & require IdP re-auth
+    if (!oauthAccount) {
+        return next(new AppError('No valid authentication method found for recovery', 400));
+    }
+
+    const recoverySessionToken = generateTempToken(user.id, '2fa-recovery', '10m');
+
+    // Store hashedToken in Redis tied to this recovery session so OAuth callback can consume it
+    await redisClient.set(
+        `2fa-recovery-session:${user.id}`,
+        hashedToken,
+        { EX: 600 }
+    );
+
+    res.cookie('recoverySession', recoverySessionToken, {
+        ...cookieOptions,
+        maxAge: 10 * 60 * 1000,
+    });
+
+    res.status(200).json({
+        status: 'success',
+        requiresOAuthReauth: true,
+        provider: oauthAccount.provider, // e.g., 'google' | 'github'
+        message: 'Recovery link verified. Please re-authenticate with your OAuth provider to disable 2FA.',
+    });
+};
+
+export const handleOAuthRecoveryCallback = async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+    oauthProfile: { provider: string; providerAccountId: string; email: string }
+): Promise<boolean> => {
+    const recoveryCookie = req.cookies?.recoverySession;
+    if (!recoveryCookie) return false; // Not a 2FA recovery flow -> proceed with normal OAuth login
+
+    // 1. Verify the recoverySession JWT
+    const userId = verifyTempToken(recoveryCookie, '2fa-recovery');
+
+    // 2. Ensure the pending recovery session still exists in Redis
+    const hashedToken = await redisClient.get(`2fa-recovery-session:${userId}`);
+    if (!hashedToken) {
+        throw new AppError('Recovery session expired. Please restart 2FA recovery.', 401);
+    }
+
+    // 3. Verify that the OAuth provider + providerAccountId (sub) match this exact user
+    const [matchedAccount] = await db
+        .select()
+        .from(authAccounts)
+        .where(
+            and(
+                eq(authAccounts.userId, userId),
+                eq(authAccounts.provider, oauthProfile.provider),
+                eq(authAccounts.providerUserId, oauthProfile.providerAccountId)
+            )
+        )
+        .limit(1);
+
+    if (!matchedAccount) {
+        throw new AppError('OAuth account does not match the account being recovered', 403);
+    }
+
+    // 4. Consume recovery token, clear cookies/Redis, and disable 2FA
+    await redisClient.del(`2fa-recovery-token:${userId}`);
+
     await db.transaction(async (tx) => {
+        await tx
+            .update(recoveryTokens)
+            .set({ usedAt: new Date() })
+            .where(
+                and(
+                    eq(recoveryTokens.userId, userId),
+                    eq(recoveryTokens.tokenHash, hashedToken),
+                    isNull(recoveryTokens.usedAt)
+                )
+            );
+
         await tx
             .update(userTwoFactor)
             .set({
@@ -698,15 +801,15 @@ export const verifyRecoveryLink = async (
                 verifiedAt: null,
                 backupCodesGeneratedAt: null,
             })
-            .where(eq(userTwoFactor.userId, user.id));
+            .where(eq(userTwoFactor.userId, userId));
 
         await tx
             .delete(twoFactorBackupCodes)
-            .where(eq(twoFactorBackupCodes.userId, user.id));
+            .where(eq(twoFactorBackupCodes.userId, userId));
     });
 
-    res.status(200).json({
-        status: 'success',
-        message: 'Recovery action completed. You can now login without 2FA and set it up again if you wish.',
-    });
+    await redisClient.del(`2fa-recovery-session:${userId}`);
+    res.clearCookie('recoverySession', cookieOptions);
+
+    return true; // Caller can now issue normal auth tokens & redirect to /settings/security
 };
