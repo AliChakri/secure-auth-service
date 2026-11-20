@@ -1,4 +1,5 @@
 import { NextFunction, Request, Response } from "express";
+import { randomBytes } from 'node:crypto';
 import speakeasy from 'speakeasy';
 import QRCode from 'qrcode';
 import bcrypt from 'bcryptjs';
@@ -575,8 +576,8 @@ export const requestRecoveryLink = async (
             .limit(1);
 
         if (twoFactorRecord?.enabled) {
-            const rawToken = crypto.randomBytes(32).toString('hex');
-            const hashedToken = hashOtp(rawToken); // SHA-256 hash helper
+            const rawToken = randomBytes(32).toString('hex');
+            const hashedToken = hashOtp(rawToken);
 
             await redisClient.set(
                 `2fa-recovery-token:${user.id}`,
@@ -590,7 +591,7 @@ export const requestRecoveryLink = async (
                 expiresAt: new Date(Date.now() + 10 * 60 * 1000),
             });
 
-            const recoveryUrl = `${process.env.FRONTEND_URL}/settings/security/2fa/recovery/verify?token=${rawToken}&email=${encodeURIComponent(user.email)}`;
+            const recoveryUrl = `${process.env.FRONTEND_URL}/auth/recovery/verify?token=${rawToken}&email=${encodeURIComponent(user.email)}`;
             console.log(`[2FA Recovery Link for ${user.email}]:`, recoveryUrl);
             // await sendRecoveryEmail(user.email, recoveryUrl);
         }
@@ -632,7 +633,6 @@ export const verifyRecoveryLink = async (
 
     const hashedToken = hashOtp(String(token).trim());
 
-    // 1. Validate recovery link token (Redis -> Postgres fallback)
     const recoveryTokenFromRedis = await redisClient.get(`2fa-recovery-token:${user.id}`);
     let isTokenValid = recoveryTokenFromRedis === hashedToken;
 
@@ -657,7 +657,6 @@ export const verifyRecoveryLink = async (
         return next(new AppError('Invalid or expired recovery link', 401));
     }
 
-    // 2. Check linked auth methods
     const accounts = await db
         .select()
         .from(authAccounts)
@@ -722,7 +721,6 @@ export const verifyRecoveryLink = async (
 
     const recoverySessionToken = generateTempToken(user.id, '2fa-recovery', '10m');
 
-    // Store hashedToken in Redis tied to this recovery session so OAuth callback can consume it
     await redisClient.set(
         `2fa-recovery-session:${user.id}`,
         hashedToken,
@@ -737,7 +735,7 @@ export const verifyRecoveryLink = async (
     res.status(200).json({
         status: 'success',
         requiresOAuthReauth: true,
-        provider: oauthAccount.provider, // e.g., 'google' | 'github'
+        provider: oauthAccount.provider,
         message: 'Recovery link verified. Please re-authenticate with your OAuth provider to disable 2FA.',
     });
 };
@@ -751,16 +749,14 @@ export const handleOAuthRecoveryCallback = async (
     const recoveryCookie = req.cookies?.recoverySession;
     if (!recoveryCookie) return false; // Not a 2FA recovery flow -> proceed with normal OAuth login
 
-    // 1. Verify the recoverySession JWT
     const userId = verifyTempToken(recoveryCookie, '2fa-recovery');
 
-    // 2. Ensure the pending recovery session still exists in Redis
+    //  Ensure the pending recovery session still exists in Redis
     const hashedToken = await redisClient.get(`2fa-recovery-session:${userId}`);
     if (!hashedToken) {
         throw new AppError('Recovery session expired. Please restart 2FA recovery.', 401);
     }
 
-    // 3. Verify that the OAuth provider + providerAccountId (sub) match this exact user
     const [matchedAccount] = await db
         .select()
         .from(authAccounts)
@@ -777,7 +773,6 @@ export const handleOAuthRecoveryCallback = async (
         throw new AppError('OAuth account does not match the account being recovered', 403);
     }
 
-    // 4. Consume recovery token, clear cookies/Redis, and disable 2FA
     await redisClient.del(`2fa-recovery-token:${userId}`);
 
     await db.transaction(async (tx) => {
@@ -811,5 +806,6 @@ export const handleOAuthRecoveryCallback = async (
     await redisClient.del(`2fa-recovery-session:${userId}`);
     res.clearCookie('recoverySession', cookieOptions);
 
-    return true; // Caller can now issue normal auth tokens & redirect to /settings/security
+    return true; 
 };
+

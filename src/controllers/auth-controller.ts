@@ -16,6 +16,7 @@ import { generateTempToken, verifyTempToken } from '../security/temp-token.js';
 import { generateAccessToken, generateRefreshToken } from '../security/token-security.js';
 import { verifyGoogleToken } from '../utils/google-verify.js';
 import { incrementOtpAttempts, isOtpBlocked, clearOtpAttempts } from '../security/otp-security.js';
+import { handleOAuthRecoveryCallback } from './2fa-controller.js';
 
 interface MyTokenPayload extends JwtPayload {
     id: string;
@@ -276,6 +277,22 @@ export const googleLogin = async (
 
     if (!email) {
         return next(new AppError('Google Account does not have an email address', 400));
+    }
+
+    // ── 2FA recovery re-auth: runs before any linking, user creation or login
+    const recovered = await handleOAuthRecoveryCallback(req, res, next, {
+        provider: 'google',
+        providerAccountId: sub,
+        email,
+    });
+
+    if (recovered) {
+        res.status(200).json({
+            status: 'success',
+            recovered: true,
+            message: '2FA has been disabled. You can now log in and set it up again.',
+        });
+        return;
     }
 
     const normalizedEmail = email.trim().toLowerCase();
